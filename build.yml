@@ -1,0 +1,750 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          mkdir -p proj && cd proj
+          mkdir -p 'app'
+          mkdir -p 'app/src/main'
+          mkdir -p 'app/src/main/java/com/example/autotyper'
+          mkdir -p 'app/src/main/res/values'
+          mkdir -p 'app/src/main/res/xml'
+          cat > 'settings.gradle.kts' << '__EOF__'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AutoTyper"
+          include(":app")
+          __EOF__
+          cat > 'build.gradle.kts' << '__EOF__'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          __EOF__
+          cat > 'gradle.properties' << '__EOF__'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          __EOF__
+          cat > 'app/build.gradle.kts' << '__EOF__'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.autotyper"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.autotyper"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          __EOF__
+          cat > 'app/src/main/AndroidManifest.xml' << '__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="false"
+                  android:label="AutoTyper"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".TyperService"
+                      android:exported="true"
+                      android:label="AutoTyper"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          __EOF__
+          cat > 'app/src/main/res/xml/accessibility_service_config.xml' << '__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/service_desc"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRequestFilterKeyEvents|flagIncludeNotImportantViews"
+              android:canRetrieveWindowContent="true"
+              android:canRequestFilterKeyEvents="true"
+              android:notificationTimeout="100" />
+          __EOF__
+          cat > 'app/src/main/res/values/strings.xml' << '__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="service_desc">다른 앱의 입력창에 지정한 텍스트를 사람처럼 자동으로 입력하고, 키보드 단축키(시작/일시정지/정지)를 감지합니다. 입력 중에는 단축키 외의 물리 키보드 입력을 차단할 수 있습니다.</string>
+          </resources>
+          __EOF__
+          cat > 'app/src/main/java/com/example/autotyper/Keys.kt' << '__EOF__'
+          package com.example.autotyper
+
+          import android.view.KeyEvent
+
+          object Keys {
+              val names = listOf(
+                  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+                  "Insert", "Home", "End", "PageUp", "PageDown", "Pause", "ScrollLock"
+              )
+              val codes: List<Int> = (0..11).map { KeyEvent.KEYCODE_F1 + it } + listOf(
+                  KeyEvent.KEYCODE_INSERT,
+                  KeyEvent.KEYCODE_MOVE_HOME,
+                  KeyEvent.KEYCODE_MOVE_END,
+                  KeyEvent.KEYCODE_PAGE_UP,
+                  KeyEvent.KEYCODE_PAGE_DOWN,
+                  KeyEvent.KEYCODE_BREAK,
+                  KeyEvent.KEYCODE_SCROLL_LOCK
+              )
+          }
+          __EOF__
+          cat > 'app/src/main/java/com/example/autotyper/MainActivity.kt' << '__EOF__'
+          package com.example.autotyper
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.graphics.Typeface
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.AdapterView
+          import android.widget.ArrayAdapter
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Spinner
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              private lateinit var prefs: SharedPreferences
+              private lateinit var tvService: TextView
+              private lateinit var tvStatus: TextView
+              private lateinit var tvSpeed: TextView
+              private lateinit var bar: ProgressBar
+              private val spinners = ArrayList<Spinner>()
+              private val keyPrefs = listOf("kStart", "kPause", "kStop")
+              private val keyDefaults = listOf(7, 8, 9)
+              private val ui = Handler(Looper.getMainLooper())
+
+              private val refresh = object : Runnable {
+                  override fun run() {
+                      updateStatus()
+                      ui.postDelayed(this, 200)
+                  }
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun label(t: String, bold: Boolean = false, size: Float = 15f): TextView {
+                  val tv = TextView(this)
+                  tv.text = t
+                  tv.textSize = size
+                  if (bold) tv.setTypeface(null, Typeface.BOLD)
+                  tv.setPadding(0, dp(12), 0, dp(4))
+                  return tv
+              }
+
+              private fun applyService() {
+                  TyperService.instance?.reload()
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(18), dp(18), dp(18), dp(24))
+                  val scroll = ScrollView(this)
+                  scroll.addView(root)
+                  setContentView(scroll)
+
+                  root.addView(label("AutoTyper", true, 24f))
+
+                  // 1) 접근성 서비스
+                  tvService = label("")
+                  root.addView(tvService)
+                  val btnAcc = Button(this)
+                  btnAcc.text = "접근성 설정 열기 (AutoTyper 켜기)"
+                  btnAcc.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  root.addView(btnAcc)
+                  val hint = TextView(this)
+                  hint.text = "설정 → 접근성 → 설치된 앱 → AutoTyper 를 켜세요.\n" +
+                          "켤 수 없다고 나오면: 설정 → 앱 → AutoTyper → ⋮ → '제한된 설정 허용' 후 다시 시도."
+                  hint.textSize = 12f
+                  hint.setTextColor(0xFF777777.toInt())
+                  root.addView(hint)
+
+                  // 2) 입력할 내용
+                  root.addView(label("입력할 내용", true))
+                  val et = EditText(this)
+                  et.setText(prefs.getString("text", ""))
+                  et.minLines = 8
+                  et.gravity = Gravity.TOP or Gravity.START
+                  et.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                  et.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun afterTextChanged(s: Editable?) {
+                          prefs.edit().putString("text", s?.toString() ?: "").apply()
+                      }
+                  })
+                  root.addView(et)
+
+                  // 3) 속도
+                  root.addView(label("타이핑 속도", true))
+                  tvSpeed = TextView(this)
+                  root.addView(tvSpeed)
+                  val sb = SeekBar(this)
+                  sb.max = 1140
+                  sb.progress = prefs.getInt("cpm", 300) - 60
+                  showSpeed(prefs.getInt("cpm", 300))
+                  sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                          val cpm = p + 60
+                          showSpeed(cpm)
+                          prefs.edit().putInt("cpm", cpm).apply()
+                          applyService()
+                      }
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+                  root.addView(sb)
+
+                  // 4) 단축키
+                  root.addView(label("키보드 단축키 (매직/블루투스 키보드)", true))
+                  val names = listOf("시작 / 재개", "일시정지", "정지 · 처음으로")
+                  for (i in 0..2) {
+                      val row = LinearLayout(this)
+                      row.orientation = LinearLayout.HORIZONTAL
+                      row.gravity = Gravity.CENTER_VERTICAL
+                      val tv = TextView(this)
+                      tv.text = names[i]
+                      tv.textSize = 15f
+                      row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                      val sp = Spinner(this)
+                      sp.adapter = android.widget.ArrayAdapter(
+                          this, android.R.layout.simple_spinner_dropdown_item, Keys.names
+                      )
+                      sp.setSelection(prefs.getInt(keyPrefs[i], keyDefaults[i]))
+                      sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                          override fun onItemSelected(p: AdapterView<*>?, v: View?, position: Int, id: Long) {
+                              onKeyPicked(i, position)
+                          }
+                          override fun onNothingSelected(p: AdapterView<*>?) {}
+                      }
+                      spinners.add(sp)
+                      row.addView(sp)
+                      root.addView(row)
+                  }
+
+                  // 5) 옵션
+                  root.addView(label("옵션", true))
+                  root.addView(checkbox("사람처럼 불규칙하게 (속도 편차, 문장부호·줄바꿈에서 잠깐 쉼)", "natural"))
+                  root.addView(checkbox("자동 입력 중에는 단축키 외 키보드 입력 차단 (물리/블루투스 키보드)", "block"))
+                  root.addView(checkbox("화면에 ▶ ⏸ ■ 조작 버튼 표시 (화면 키보드 사용 시 필수)", "overlay"))
+
+                  // 6) 상태
+                  root.addView(label("상태", true))
+                  tvStatus = TextView(this)
+                  tvStatus.textSize = 16f
+                  root.addView(tvStatus)
+                  bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  root.addView(bar)
+
+                  val btnStart = Button(this)
+                  btnStart.text = "3초 후 시작 (그 사이 입력할 창을 누르세요)"
+                  btnStart.setOnClickListener {
+                      val svc = TyperService.instance
+                      if (svc == null) {
+                          Toast.makeText(this, "먼저 접근성 서비스를 켜주세요", Toast.LENGTH_SHORT).show()
+                      } else {
+                          Toast.makeText(this, "3초 안에 입력할 창을 눌러주세요", Toast.LENGTH_SHORT).show()
+                          ui.postDelayed({ TyperService.instance?.handle(0) }, 3000)
+                      }
+                  }
+                  root.addView(btnStart)
+
+                  val row2 = LinearLayout(this)
+                  row2.orientation = LinearLayout.HORIZONTAL
+                  val btnPause = Button(this)
+                  btnPause.text = "일시정지"
+                  btnPause.setOnClickListener { TyperService.instance?.handle(1) }
+                  val btnStop = Button(this)
+                  btnStop.text = "정지 · 처음으로"
+                  btnStop.setOnClickListener { TyperService.instance?.handle(2) }
+                  row2.addView(btnPause, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  row2.addView(btnStop, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  root.addView(row2)
+
+                  val help = TextView(this)
+                  help.text = "\n사용법: 내용 입력 → 입력할 앱에서 입력창을 눌러 커서 두기 → 시작 단축키(또는 ▶).\n" +
+                          "일시정지 후 시작 단축키(또는 ▶)를 다시 누르면 이어서 입력됩니다."
+                  help.textSize = 12f
+                  help.setTextColor(0xFF777777.toInt())
+                  root.addView(help)
+              }
+
+              private fun checkbox(text: String, key: String): CheckBox {
+                  val cb = CheckBox(this)
+                  cb.text = text
+                  cb.isChecked = prefs.getBoolean(key, true)
+                  cb.setOnCheckedChangeListener { _, checked ->
+                      prefs.edit().putBoolean(key, checked).apply()
+                      applyService()
+                  }
+                  return cb
+              }
+
+              private fun showSpeed(cpm: Int) {
+                  tvSpeed.text = "분당 " + cpm + "자 (약 " + (cpm / 5) + " WPM)"
+              }
+
+              private fun onKeyPicked(index: Int, position: Int) {
+                  if (position == prefs.getInt(keyPrefs[index], keyDefaults[index])) return
+                  for (j in 0..2) {
+                      if (j != index && prefs.getInt(keyPrefs[j], keyDefaults[j]) == position) {
+                          Toast.makeText(this, "세 단축키는 서로 달라야 해요", Toast.LENGTH_SHORT).show()
+                          spinners[index].setSelection(prefs.getInt(keyPrefs[index], keyDefaults[index]))
+                          return
+                      }
+                  }
+                  prefs.edit().putInt(keyPrefs[index], position).apply()
+                  applyService()
+              }
+
+              private fun updateStatus() {
+                  val svc = TyperService.instance
+                  if (svc == null) {
+                      tvService.text = "⚠️ 접근성 서비스가 꺼져 있어요"
+                      tvStatus.text = "대기 중 (서비스 꺼짐)"
+                      bar.max = 1
+                      bar.progress = 0
+                      return
+                  }
+                  tvService.text = "✅ 접근성 서비스 켜짐"
+                  val s = when (svc.state) {
+                      TyperService.RUNNING -> "자동 입력 중…"
+                      TyperService.PAUSED -> "일시정지"
+                      else -> "대기 중"
+                  }
+                  val msg = if (svc.message.isNotEmpty()) "  —  " + svc.message else ""
+                  tvStatus.text = s + msg + "   (" + svc.pos + " / " + svc.total + ")"
+                  bar.max = Math.max(svc.total, 1)
+                  bar.progress = svc.pos
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  ui.post(refresh)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  ui.removeCallbacks(refresh)
+              }
+          }
+          __EOF__
+          cat > 'app/src/main/java/com/example/autotyper/TyperService.kt' << '__EOF__'
+          package com.example.autotyper
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.MotionEvent
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.Random
+
+          class TyperService : AccessibilityService() {
+
+              companion object {
+                  const val IDLE = 0
+                  const val RUNNING = 1
+                  const val PAUSED = 2
+
+                  @Volatile
+                  var instance: TyperService? = null
+              }
+
+              @Volatile var state = IDLE
+              @Volatile var pos = 0
+              @Volatile var total = 0
+              @Volatile var message = ""
+
+              private var text = ""
+              private var cpm = 300
+              private var natural = true
+              private var block = true
+              private var showOverlayPref = true
+              private var kStart = 7
+              private var kPause = 8
+              private var kStop = 9
+
+              private val handler = Handler(Looper.getMainLooper())
+              private val rng = Random()
+              private var fails = 0
+
+              private var overlay: LinearLayout? = null
+              private var overlayLp: WindowManager.LayoutParams? = null
+              private var overlayStatus: TextView? = null
+
+              // ───────── 서비스 수명주기 ─────────
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+                  reload()
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  handler.removeCallbacksAndMessages(null)
+                  state = IDLE
+                  pos = 0
+                  removeOverlay()
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              fun reload() {
+                  val p = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+                  cpm = p.getInt("cpm", 300).coerceIn(60, 1200)
+                  natural = p.getBoolean("natural", true)
+                  block = p.getBoolean("block", true)
+                  showOverlayPref = p.getBoolean("overlay", true)
+                  val max = Keys.codes.size - 1
+                  kStart = p.getInt("kStart", 7).coerceIn(0, max)
+                  kPause = p.getInt("kPause", 8).coerceIn(0, max)
+                  kStop = p.getInt("kStop", 9).coerceIn(0, max)
+                  if (showOverlayPref) showOverlay() else removeOverlay()
+              }
+
+              // ───────── 물리/블루투스 키보드 단축키 + 입력 차단 ─────────
+              override fun onKeyEvent(event: KeyEvent): Boolean {
+                  val code = event.keyCode
+                  val action = when (code) {
+                      Keys.codes[kStart] -> 0
+                      Keys.codes[kPause] -> 1
+                      Keys.codes[kStop] -> 2
+                      else -> -1
+                  }
+                  if (action >= 0) {
+                      if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) handle(action)
+                      return true // 단축키는 다른 앱으로 전달하지 않음
+                  }
+                  // 자동 입력 중에는 단축키 외 키 입력 차단
+                  return state == RUNNING && block
+              }
+
+              // ───────── 동작 ─────────
+              // 0 = 시작/재개, 1 = 일시정지, 2 = 정지(처음으로)
+              fun handle(action: Int) {
+                  when (action) {
+                      0 -> {
+                          if (state == PAUSED) {
+                              state = RUNNING
+                              message = ""
+                              tick()
+                          } else if (state == IDLE) {
+                              reload()
+                              text = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+                                  .getString("text", "").orEmpty().replace("\r\n", "\n").replace("\r", "\n")
+                              if (text.isEmpty()) {
+                                  message = "입력할 내용이 비어 있어요"
+                              } else {
+                                  pos = 0
+                                  total = text.length
+                                  fails = 0
+                                  message = ""
+                                  state = RUNNING
+                                  tick()
+                              }
+                          }
+                      }
+                      1 -> {
+                          if (state == RUNNING) {
+                              handler.removeCallbacksAndMessages(null)
+                              state = PAUSED
+                          }
+                      }
+                      2 -> {
+                          handler.removeCallbacksAndMessages(null)
+                          state = IDLE
+                          pos = 0
+                          message = ""
+                      }
+                  }
+                  updateOverlay()
+              }
+
+              private fun findInput(): AccessibilityNodeInfo? {
+                  val root = rootInActiveWindow ?: return null
+                  val node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return null
+                  return if (node.isEditable) node else null
+              }
+
+              private fun currentText(node: AccessibilityNodeInfo): String {
+                  if (Build.VERSION.SDK_INT >= 26 && node.isShowingHintText) return ""
+                  return node.text?.toString() ?: ""
+              }
+
+              private fun tick() {
+                  if (state != RUNNING) return
+                  if (pos >= text.length) {
+                      state = IDLE
+                      pos = 0
+                      message = "완료"
+                      updateOverlay()
+                      return
+                  }
+                  val node = findInput()
+                  if (node == null) {
+                      message = "입력창을 먼저 눌러 선택하세요"
+                      handler.postDelayed({ tick() }, 400)
+                      return
+                  }
+                  message = ""
+
+                  val ch = text[pos]
+                  val unit = if (Character.isHighSurrogate(ch) && pos + 1 < text.length)
+                      text.substring(pos, pos + 2) else ch.toString()
+                  val newText = currentText(node) + unit
+
+                  val args = Bundle()
+                  args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newText)
+                  val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                  if (ok) {
+                      val sel = Bundle()
+                      sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, newText.length)
+                      sel.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, newText.length)
+                      node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel)
+                      pos += unit.length
+                      fails = 0
+                  } else {
+                      fails++
+                      if (fails >= 5) {
+                          state = IDLE
+                          pos = 0
+                          message = "이 입력창에는 입력할 수 없어요"
+                          updateOverlay()
+                          return
+                      }
+                  }
+                  handler.postDelayed({ tick() }, delayMs(ch))
+              }
+
+              private fun delayMs(ch: Char): Long {
+                  val b = 60000.0 / cpm
+                  if (!natural) return b.toLong()
+                  var d = Math.max(b * 0.35, b + rng.nextGaussian() * b * 0.35)
+                  if (ch == ' ') {
+                      d *= 1.4
+                  } else if (ch == '.' || ch == ',' || ch == '!' || ch == '?' || ch == ';' || ch == ':') {
+                      d *= 2.0 + 1.5 * rng.nextDouble()
+                  } else if (ch == '\n') {
+                      d *= 3.0 + 3.0 * rng.nextDouble()
+                  }
+                  if (rng.nextDouble() < 0.025) d += 250 + 650 * rng.nextDouble() // 가끔 생각하듯 멈춤
+                  return d.toLong()
+              }
+
+              // ───────── 화면 위 조작 버튼 (화면 키보드 사용 시 필수) ─────────
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun showOverlay() {
+                  if (overlay != null) return
+                  val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.gravity = Gravity.CENTER_VERTICAL
+                  bar.setBackgroundColor(Color.parseColor("#E6222222"))
+                  bar.setPadding(dp(6), dp(4), dp(6), dp(4))
+
+                  val lp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  lp.gravity = Gravity.TOP or Gravity.START
+                  lp.x = dp(24)
+                  lp.y = dp(120)
+
+                  // 드래그 손잡이
+                  val grip = TextView(this)
+                  grip.text = "⠿"
+                  grip.textSize = 22f
+                  grip.setTextColor(Color.WHITE)
+                  grip.setPadding(dp(8), 0, dp(8), 0)
+                  var sx = 0f
+                  var sy = 0f
+                  var ox = 0
+                  var oy = 0
+                  grip.setOnTouchListener { _, ev ->
+                      when (ev.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = ev.rawX; sy = ev.rawY; ox = lp.x; oy = lp.y
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = ox + (ev.rawX - sx).toInt()
+                              lp.y = oy + (ev.rawY - sy).toInt()
+                              wm.updateViewLayout(bar, lp)
+                          }
+                      }
+                      true
+                  }
+                  bar.addView(grip)
+
+                  val status = TextView(this)
+                  status.setTextColor(Color.WHITE)
+                  status.textSize = 13f
+                  status.minWidth = dp(64)
+                  status.gravity = Gravity.CENTER
+                  bar.addView(status)
+
+                  fun makeButton(label: String, action: Int) {
+                      val b = Button(this)
+                      b.text = label
+                      b.textSize = 16f
+                      b.minWidth = 0
+                      b.minHeight = 0
+                      b.setPadding(dp(14), dp(8), dp(14), dp(8))
+                      b.setOnClickListener { handle(action) }
+                      val blp = LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.WRAP_CONTENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      )
+                      blp.leftMargin = dp(4)
+                      bar.addView(b, blp)
+                  }
+                  makeButton("▶", 0)
+                  makeButton("⏸", 1)
+                  makeButton("■", 2)
+
+                  try {
+                      wm.addView(bar, lp)
+                      overlay = bar
+                      overlayLp = lp
+                      overlayStatus = status
+                      updateOverlay()
+                  } catch (e: Exception) {
+                      overlay = null
+                  }
+              }
+
+              private fun removeOverlay() {
+                  val o = overlay ?: return
+                  try {
+                      (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(o)
+                  } catch (e: Exception) {
+                  }
+                  overlay = null
+                  overlayLp = null
+                  overlayStatus = null
+              }
+
+              private fun updateOverlay() {
+                  overlayStatus?.text = when (state) {
+                      RUNNING -> "입력 중"
+                      PAUSED -> "일시정지"
+                      else -> "대기"
+                  }
+              }
+          }
+          __EOF__
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Accept SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoTyper-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
